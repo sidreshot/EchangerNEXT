@@ -19,6 +19,3 @@ to get up and running for a Flask app if you have not done this before.
 ### Developer documentation
 #### Redis layout https://github.com/sidreshot/EchangerNEXT/blob/master/RedisStructure.md
 #### SQL layout https://github.com/sidreshot/EchangerNEXT/blob/master/SQLStructure.md
-
----
-Contact the original author at sambarani@utexas.edu
