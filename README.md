@@ -17,8 +17,8 @@ Otherwise, you will need to configure the app to run on your webserver. Nginx + 
 to get up and running for a Flask app if you have not done this before. 
 
 ### Developer documentation
-#### Redis layout https://github.com/sb-/OpenExchange/wiki/Redis-Structure
-#### SQL layout https://github.com/sb-/OpenExchange/wiki/SQL-Structure
+#### Redis layout https://github.com/sidreshot/EchangerNEXT/blob/master/RedisStructure.md
+#### SQL layout https://github.com/sidreshot/EchangerNEXT/blob/master/SQLStructure.md
 
 ---
 Contact the original author at sambarani@utexas.edu
