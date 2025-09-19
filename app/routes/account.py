@@ -1,83 +1,97 @@
-"""
-=================
-Account functions
-=================
-"""
-from flask import Blueprint, session, request, flash
-from app.util import is_logged_in, home_page, account_page, adjustbalance, check_balance, string_to_currency_unit, tradehistory
-from app.database import db_session
-from app.config import config
-from app.models import *
-account = Blueprint('account', __name__, url_prefix='/account')
+"""Account management endpoints."""
+from __future__ import annotations
+
+from decimal import Decimal
+
+from flask import Blueprint, flash, redirect, render_template, request, url_for
+
+from ..database import db_session
+from ..models import CompletedOrder
+from ..rpc import WalletError
+from ..services import accounts
+from ..services.conversion import ConversionError, string_to_unit
+from .helpers import get_current_user, get_settings, get_wallet_registry, login_required
+
+blueprint = Blueprint("account", __name__, url_prefix="/account")
 
 
-@account.route('/withdraw/<currency>', methods=['GET', 'POST'])
-def withdraw(currency):
-    if not is_logged_in(session):
-        flash("Please log in to perform that action.", "error")
-        return home_page("ltc_btc")
-    if not config.is_valid_currency(currency):
-        flash("Invalid Currency!", "error")
-        return account_page()
-    if request.method == 'GET':
-        return account_page(withdraw=currency)
-    elif request.method == 'POST':
-        if 'amount' not in request.form or 'address' not in request.form:
-            flash("Please enter an address and an amount!", "error")
-            return account_page()
-        try:
-            total = string_to_currency_unit(
-                request.form['amount'],
-                config.get_multiplier(currency))
-        except:
-            flash("Invalid amount!", "error")
-            return account_page()
-        if check_balance(currency, session['userid']) < total or total < 0:
-            flash("Balance too low to execute withdrawal!", "error")
-            return account_page()
-        # TODO: add valid address checking
-        adjustbalance(currency, session['userid'], -1 * total)
-        co = CompletedOrder(
-            currency +
-            "_" +
-            currency,
-            "WITHDRAWAL",
-            total,
-            0,
-            session['userid'],
-            is_withdrawal=True,
-            withdrawal_address=request.form['address'])
-        db_session.add(co)
-        db_session.commit()
-        flash("Deposit to " + request.form['address'] + " completed!", "success")
-        return account_page()
+@blueprint.route("/")
+@login_required
+def index():
+    user = get_current_user()
+    settings = get_settings()
+    balances = accounts.get_balance_view(user, settings)
+    addresses = {address.currency: address.address for address in user.addresses}
+    history_currency = request.args.get("history")
+    history = []
+    if history_currency and history_currency in settings.currencies:
+        history = accounts.get_trade_history(user, history_currency)
+    return render_template(
+        "account/index.html",
+        balances=balances,
+        addresses=addresses,
+        currencies=settings.currencies,
+        history=history,
+        history_currency=history_currency,
+    )
 
 
-@account.route('/deposit/<currency>')
-def deposit(currency):
-    """ Returns deposit address for given currency from SQL. """
-    if not is_logged_in(session):
-        flash("Please log in to perform that action.", 'error')
-        return home_page("ltc_btc")
-    if not config.is_valid_currency(currency):
-        flash("Invalid Currency!", "error")
-        return account_page()
-    addr = Address.query.filter(
-        Address.currency == currency).filter(
-        Address.user == session['userid']).first().address
-    return account_page(deposit=addr)
+@blueprint.route("/deposit/<currency>", methods=["POST"])
+@login_required
+def create_deposit_address(currency: str):
+    settings = get_settings()
+    if currency not in settings.currencies:
+        flash("Unknown currency", "danger")
+        return redirect(url_for("account.index"))
+    user = get_current_user()
+    registry = get_wallet_registry()
+    try:
+        address = registry.get_new_address(currency, label=f"user-{user.id}")
+    except WalletError as exc:
+        flash(f"Unable to request address: {exc}", "danger")
+    else:
+        accounts.set_deposit_address(user, currency, address)
+        flash(f"New {currency.upper()} deposit address generated", "success")
+    return redirect(url_for("account.index"))
 
 
-@account.route('/history/<currency>')
-def history(currency):
-    if not is_logged_in(session):
-        flash("Please log in to perform that action.", 'error')
-        return home_page("ltc_btc")
-    if not config.is_valid_currency(currency):
-        flash("Invalid Currency!", 'error')
-        return account_page()
-    return account_page(
-        history=currency,
-        orders=tradehistory(
-            currency,
-            session['userid']))
+@blueprint.route("/withdraw", methods=["POST"])
+@login_required
+def withdraw():
+    settings = get_settings()
+    user = get_current_user()
+    currency = request.form.get("currency", "").lower()
+    address = request.form.get("address", "").strip()
+    amount_raw = request.form.get("amount", "0").strip()
+    if currency not in settings.currencies:
+        flash("Unknown currency", "danger")
+        return redirect(url_for("account.index"))
+    try:
+        multiplier = settings.currency(currency).multiplier
+        amount_units = string_to_unit(amount_raw, multiplier)
+    except ConversionError as exc:
+        flash(str(exc), "danger")
+        return redirect(url_for("account.index"))
+    if amount_units <= 0:
+        flash("Amount must be greater than zero", "danger")
+        return redirect(url_for("account.index"))
+    try:
+        accounts.change_balance(user, currency, -amount_units)
+    except accounts.AccountError as exc:
+        flash(str(exc), "danger")
+        return redirect(url_for("account.index"))
+    order = CompletedOrder(
+        user_id=user.id,
+        instrument=f"{currency}_{currency}",
+        side="WITHDRAW",
+        base_currency=currency,
+        quote_currency=currency,
+        amount=amount_units,
+        price=Decimal("0"),
+        is_withdrawal=True,
+        withdrawal_address=address,
+    )
+    db_session.add(order)
+    db_session.commit()
+    flash("Withdrawal request queued", "info")
+    return redirect(url_for("account.index"))

@@ -1,86 +1,116 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Boolean
-from sqlalchemy.orm import relationship, backref
-from database import Base
+"""Database models for the exchange."""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from decimal import Decimal
+
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Column,
+    DateTime,
+    ForeignKey,
+    Integer,
+    Numeric,
+    String,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import relationship
+
+from .database import Base
 
 
-class User(Base):
-    __tablename__ = 'users'
+class TimestampMixin:
+    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    updated_at = Column(
+        DateTime,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+
+
+class User(Base, TimestampMixin):
+    __tablename__ = "users"
+
     id = Column(Integer, primary_key=True)
-    name = Column(String(50), unique=True)
-    email = Column(String(120), unique=True)
-    password = Column(String(120))
-    btc_balance = Column(Integer)
-    ltc_balance = Column(Integer)
-    activated = Column(Boolean)
-    #orders = relationship("Order",backref="users")
+    username = Column(String(80), unique=True, nullable=False)
+    email = Column(String(255), unique=True, nullable=False)
+    password_hash = Column(String(255), nullable=False)
+    is_active = Column(Boolean, default=False, nullable=False)
+    is_admin = Column(Boolean, default=False, nullable=False)
 
-    def __init__(self, name, email, password):
-        self.name = name
-        self.email = email
-        self.password = password
-        self.btc_balance = 0
-        self.ltc_balance = 0
-        self.activated = False
+    balances = relationship(
+        "WalletBalance",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    addresses = relationship(
+        "Address",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    orders = relationship(
+        "CompletedOrder",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
 
-    def __repr__(self):
-        return '<User %r>' % (self.name)
+    def balance_for(self, currency: str) -> int:
+        """Return the balance in the currency's smallest unit."""
+        for balance in self.balances:
+            if balance.currency == currency:
+                return balance.balance
+        return 0
 
 
-class CompletedOrder(Base):
-    __tablename__ = 'completedorders'
+class WalletBalance(Base, TimestampMixin):
+    __tablename__ = "wallet_balances"
+    __table_args__ = (
+        UniqueConstraint("user_id", "currency", name="uq_wallet_currency"),
+    )
+
     id = Column(Integer, primary_key=True)
-    currency_pair = Column(String(9))
-    base_currency = Column(String(4))
-    quote_currency = Column(String(4))
-    order_type = Column(String(8))
-    amount = Column(Integer)
-    price = Column(Integer)
-    time_started = Column(DateTime)
-    time_ended = Column(DateTime)
-    user = Column(Integer, ForeignKey("users.id"), nullable=False)
-    is_deposit = Column(Boolean)
-    is_withdrawal = Column(Boolean)
-    withdrawal_complete = Column(Boolean)
-    withdrawal_address = Column(String(38))
-    transaction_id = Column(String(36))  # I think I only need 32
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    currency = Column(String(10), nullable=False)
+    balance = Column(BigInteger, default=0, nullable=False)
 
-    def __init__(
-            self,
-            currency_pair,
-            order_type,
-            amount,
-            price,
-            userid,
-            is_deposit=False,
-            is_withdrawal=False,
-            withdrawal_address=None,
-            transaction_id=None):
-        self.currency_pair = currency_pair
-        self.active = 1
-        self.completed = 0
-        self.order_type = order_type
-        self.amount = amount
-        self.price = price
-        self.user = userid
-        self.is_deposit = is_deposit
-        self.is_withdrawal = is_withdrawal
-        # The object will never be instantiated with a withdrawal already done
-        self.withdrawal_complete = False
-        self.withdrawal_address = withdrawal_address
-        self.transaction_id = transaction_id
-        # TODO: maybe have making deposits cleaner?
-        self.base_currency = currency_pair[0:currency_pair.find("_")]
-        self.quote_currency = currency_pair[currency_pair.find("_") + 1:]
+    user = relationship("User", back_populates="balances")
 
 
-class Address(Base):
-    __tablename__ = 'addresses'
+class Address(Base, TimestampMixin):
+    __tablename__ = "wallet_addresses"
+    __table_args__ = (
+        UniqueConstraint("currency", "address", name="uq_currency_address"),
+    )
+
     id = Column(Integer, primary_key=True)
-    currency = Column(String(3))
-    address = Column(String(4))
-    user = Column(Integer, ForeignKey("users.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    currency = Column(String(10), nullable=False)
+    address = Column(String(128), nullable=False)
+    label = Column(String(64))
 
-    def __init__(self, currency, address, user):
-        self.currency = currency
-        self.address = address
-        self.user = user
+    user = relationship("User", back_populates="addresses")
+
+
+class CompletedOrder(Base, TimestampMixin):
+    __tablename__ = "completed_orders"
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    instrument = Column(String(15), nullable=False)
+    side = Column(String(4), nullable=False)
+    base_currency = Column(String(10), nullable=False)
+    quote_currency = Column(String(10), nullable=False)
+    amount = Column(BigInteger, nullable=False)
+    price = Column(Numeric(precision=18, scale=8), nullable=False)
+    is_deposit = Column(Boolean, default=False, nullable=False)
+    is_withdrawal = Column(Boolean, default=False, nullable=False)
+    withdrawal_address = Column(String(128))
+    transaction_id = Column(String(128))
+
+    user = relationship("User", back_populates="orders")
+
+    @property
+    def price_decimal(self) -> Decimal:
+        return Decimal(self.price)

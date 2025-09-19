@@ -1,223 +1,216 @@
-##############################
-# worker.py (transaction processing)
-##############################
+"""Order matching worker."""
+from __future__ import annotations
 
-from database import init_db, db_session, redis
-from models import CompletedOrder
-from util import adjustbalance, generate_password_hash
-import random
-from config import config
-#import daemon
+import logging
+import time
+from decimal import Decimal
+
+import click
+from . import create_app
+from .database import db_session, get_redis_client
+from .models import CompletedOrder, User
+from .services import accounts
+from .settings import Settings
+
+logger = logging.getLogger(__name__)
 
 
-def fill_order():
-    """ Typical limit order book implementation, handles orders in Redis and writes exchange history to SQL. """
-    orderid = redis.blpop("order_queue")[1]
-    order = redis.hgetall(orderid)
-    print("FILLING ORDER: " + str(order))
-    ordertype = order["ordertype"]
+def _quote_units(settings: Settings, instrument: str, amount_units: int, price: Decimal) -> int:
+    base_currency, quote_currency = instrument.split("_")
+    base_multiplier = Decimal(settings.currency(base_currency).multiplier)
+    quote_multiplier = Decimal(settings.currency(quote_currency).multiplier)
+    return int((Decimal(amount_units) / base_multiplier * price * quote_multiplier).quantize(Decimal(1)))
 
-    # do this here, the canceled order hashes dont have all the info that
-    # normal ones do
-    if ordertype == "cancel":
-        old_order_id = order['old_order_id']
-        if redis.exists(old_order_id):
-            old_order = redis.hgetall(old_order_id)
-            redis.delete(old_order_id)
-            cUID = old_order['uid']
-            ramount = int(old_order["amount"])
-            instrument = old_order["instrument"]
-            price = float(old_order["price"])
 
-            redis.lrem("order_queue", old_order_id)
-            redis.srem(str(cUID) + "/orders", old_order_id)
+def _record_trade(user_id: int, instrument: str, side: str, amount_units: int, price: Decimal) -> None:
+    base_currency, quote_currency = instrument.split("_")
+    order = CompletedOrder(
+        user_id=user_id,
+        instrument=instrument,
+        side=side,
+        base_currency=base_currency,
+        quote_currency=quote_currency,
+        amount=amount_units,
+        price=price,
+    )
+    db_session.add(order)
 
-            if old_order['ordertype'] == 'buy':
-                redis.zrem(old_order['instrument'] + "/bid", old_order_id)
-                adjustbalance(
-                    instrument.split("_")[1],
-                    cUID,
-                    ramount *
-                    price,
-                    price)
-            elif old_order['ordertype'] == 'sell':
-                redis.zrem(old_order['instrument'] + "/ask", old_order_id)
-                adjustbalance(instrument.split("_")[0], cUID, ramount, price)
+
+def _handle_cancel(settings: Settings, redis, order: dict) -> None:
+    old_order_id = order.get("old_order_id")
+    if not old_order_id or not redis.exists(old_order_id):
         return
-
-    ramount = int(order["amount"])
-    instrument = order["instrument"]
-    base_currency = instrument.split("_")[0]
-    quote_currency = instrument.split("_")[1]
-    bidtable = instrument + "/bid"
-    asktable = instrument + "/ask"
-    completedlist = instrument + "/completed"
-    price = float(order["price"])
-    uid = order["uid"]
-
-    if ordertype == 'buy':
-        lowesthash = redis.zrange(asktable, 0, 0)
-        # search ask table to see if there are any orders that are at or below
-        # this price
-        lowestprice = 0.0
-        norders = redis.zcard(asktable)
-        if norders > 0:
-            lowestprice = redis.zscore(asktable, lowesthash[0])
-        amount_to_buy = 0
-        if lowestprice > price or norders < 1:
-            # if there are none, add straight to the orderbook
-            redis.zadd(bidtable, orderid, price)
-        else:
-            orders = redis.zrangebyscore(asktable, 0, price)
-            # Go through as many valid orders as needed
-            for current in orders:
-                camt = int(redis.hget(current, "amount"))
-                cUID = redis.hget(current, "uid")
-                if ramount < camt:
-                    # Adjust their amount
-                    amount_to_buy = ramount
-                    ramount = 0
-                    redis.hset(current, "amount", camt - amount_to_buy)
-                    amount_to_credit = price * ramount
-                    adjustbalance(
-                        quote_currency,
-                        cUID,
-                        price *
-                        amount_to_buy,
-                        price)
-
-                else:
-                    # Our order is bigger than theirs, we can remove them from
-                    # the books
-                    amount_to_buy += camt
-                    ramount -= camt
-                    redis.delete(current)
-                    redis.zrem(asktable, current)
-                    redis.srem(str(cUID) + "/orders", current)
-                    adjustbalance(quote_currency, cUID, price * camt, price)
-                co = CompletedOrder(
-                    instrument,
-                    'sell',
-                    amount_to_buy,
-                    price,
-                    cUID)
-                db_session.add(co)
-                completedtxredis = generate_password_hash(
-                    current + str(random.random()))
-                redis.hmset(
-                    completedtxredis,
-                    {
-                        'price': price,
-                        'quote_currency_amount': price *
-                        amount_to_buy /
-                        config.get_multiplier(quote_currency),
-                        'base_currency_amount': amount_to_buy /
-                        config.get_multiplier(base_currency)})
-                # redis.expire(completedtxredis,86400) # 24 * 60 * 60
-                redis.zadd(completedlist, completedtxredis, price)
-                if ramount == 0:
-                    redis.srem(str(uid) + "/orders", orderid)
-                    # TODO: Write a completed transaction to SQL??
-                    break
-        if ramount != 0:
-            redis.zadd(bidtable, orderid, price)
-            redis.hset(orderid, "amount", ramount)
-        if(amount_to_buy != 0):
-            # TODO: Write a completed transaction to SQL
-            adjustbalance(base_currency, uid, amount_to_buy, price)
-            co = CompletedOrder(instrument, 'buy', amount_to_buy, price, uid)
-            db_session.add(co)
-
-    elif ordertype == 'sell':
-        # search bid table to see if there are are at or above this price
-        highesthash = redis.zrange(bidtable, -1, -1)
-        norders = redis.zcard(bidtable)
-        highestprice = 0
-        if norders > 0:
-            highestprice = redis.zscore(
-                bidtable,
-                highesthash[0])  # unsure why, but this workaround is needed for now
-        if norders < 1 or highestprice < price:
-            # if not add straight to the books
-            redis.zadd(asktable, orderid, price)
-        else:
-            orders = redis.zrangebyscore(bidtable, price, '+inf')[::-1]
-            amount_to_credit = 0
-            for current in orders:
-                camt = int(redis.hget(current, "amount"))
-                cUID = redis.hget(current, "uid")
-                if ramount < camt:
-                    amount_to_credit += ramount
-                    amount_to_sell = ramount
-                    ramount = 0
-                    redis.hset(current, "amount", camt - amount_to_sell)
-                    amount_to_credit += ramount
-                    adjustbalance(base_currency, cUID, amount_to_sell, price)
-
-                else:
-                    amount_to_credit += camt
-                    amount_to_sell = camt
-                    ramount -= camt
-                    redis.delete(current)
-                    redis.zrem(bidtable, current)
-                    redis.srem(str(cUID) + "/orders", current)
-                    adjustbalance(base_currency, cUID, amount_to_sell, price)
-
-                co = CompletedOrder(
-                    instrument,
-                    'buy',
-                    amount_to_sell,
-                    price,
-                    cUID)
-                db_session.add(co)
-                completedtxredis = generate_password_hash(
-                    current + str(random.random()))
-                redis.hmset(
-                    completedtxredis,
-                    {
-                        'price': price,
-                        'quote_currency_amount': price *
-                        amount_to_sell /
-                        config.get_multiplier(quote_currency),
-                        'base_currency_amount': amount_to_sell /
-                        config.get_multiplier(base_currency)})
-                # redis.expire(completedtxredis,86400) # 24 * 60 * 60
-                redis.zadd(completedlist, completedtxredis, price)
-
-                if ramount == 0:
-                    # TODO: Write a completed transaction to SQL
-                    redis.srem(str(uid) + "/orders", orderid)
-                    break
-            if(ramount != 0):
-                redis.zadd(asktable, orderid, price)
-                redis.hset(orderid, "amount", ramount)
-            if(amount_to_credit != 0):
-                # TODO: Write a completed transaction to SQL
-                adjustbalance(
-                    quote_currency,
-                    uid,
-                    amount_to_credit *
-                    price,
-                    price)
-                co = CompletedOrder(
-                    instrument,
-                    'sell',
-                    amount_to_credit *
-                    price,
-                    price,
-                    uid)
-                db_session.add(co)
+    existing = redis.hgetall(old_order_id)
+    instrument = existing.get("instrument")
+    if not instrument:
+        redis.delete(old_order_id)
+        return
+    user_id = int(existing.get("uid", 0))
+    user = db_session.get(User, user_id)
+    if not user:
+        redis.delete(old_order_id)
+        return
+    side = existing.get("ordertype")
+    amount_units = int(existing.get("amount", 0))
+    price = Decimal(existing.get("price", "0"))
+    base_currency, quote_currency = instrument.split("_")
+    if side == "buy":
+        refund_units = _quote_units(settings, instrument, amount_units, price)
+        accounts.change_balance(user, quote_currency, refund_units)
+        redis.zrem(f"{instrument}/bid", old_order_id)
     else:
-        pass  # TODO: throw an error, not a buy or sell
+        accounts.change_balance(user, base_currency, amount_units)
+        redis.zrem(f"{instrument}/ask", old_order_id)
+    redis.delete(old_order_id)
+    redis.srem(f"{user_id}/orders", old_order_id)
 
-    # db_session.add(b)
-    db_session.commit()
+
+def _match_order(settings: Settings, redis, order_id: str, payload: dict) -> None:
+    instrument = payload["instrument"]
+    side = payload["ordertype"]
+    price = Decimal(payload["price"])
+    amount_remaining = int(payload["amount"])
+    user_id = int(payload["uid"])
+    user = db_session.get(User, user_id)
+    if not user:
+        logger.warning("Dropping order %s for unknown user %s", order_id, user_id)
+        return
+    base_currency, quote_currency = instrument.split("_")
+    bid_key = f"{instrument}/bid"
+    ask_key = f"{instrument}/ask"
+    completed_key = f"{instrument}/completed"
+
+    if side == "buy":
+        while amount_remaining > 0:
+            best_match = redis.zrange(ask_key, 0, 0)
+            if not best_match:
+                break
+            match_id = best_match[0]
+            best_price = Decimal(str(redis.zscore(ask_key, match_id)))
+            if best_price > price:
+                break
+            match_payload = redis.hgetall(match_id)
+            match_amount = int(match_payload.get("amount", 0))
+            seller_id = int(match_payload.get("uid", 0))
+            seller = db_session.get(User, seller_id)
+            if not seller:
+                redis.delete(match_id)
+                redis.zrem(ask_key, match_id)
+                continue
+            trade_amount = min(amount_remaining, match_amount)
+            quote_units = _quote_units(settings, instrument, trade_amount, price)
+            accounts.change_balance(seller, quote_currency, quote_units)
+            accounts.change_balance(user, base_currency, trade_amount)
+            _record_trade(user.id, instrument, "buy", trade_amount, price)
+            _record_trade(seller.id, instrument, "sell", trade_amount, price)
+            completed_id = f"completed:{order_id}:{match_id}:{trade_amount}"
+            redis.hset(
+                completed_id,
+                mapping={
+                    "price": float(price),
+                    "quote_currency_amount": float(quote_units) / settings.currency(quote_currency).multiplier,
+                    "base_currency_amount": float(trade_amount) / settings.currency(base_currency).multiplier,
+                },
+            )
+            redis.zadd(completed_key, {completed_id: float(price)})
+            amount_remaining -= trade_amount
+            if trade_amount == match_amount:
+                redis.delete(match_id)
+                redis.zrem(ask_key, match_id)
+                redis.srem(f"{seller_id}/orders", match_id)
+            else:
+                redis.hset(match_id, mapping={"amount": match_amount - trade_amount})
+            db_session.commit()
+        if amount_remaining > 0:
+            redis.hset(order_id, mapping={"amount": amount_remaining})
+            redis.zadd(bid_key, {order_id: float(price)})
+        else:
+            redis.delete(order_id)
+            redis.zrem(bid_key, order_id)
+            redis.srem(f"{user_id}/orders", order_id)
+    elif side == "sell":
+        while amount_remaining > 0:
+            best_match = redis.zrange(bid_key, -1, -1)
+            if not best_match:
+                break
+            match_id = best_match[0]
+            best_price = Decimal(str(redis.zscore(bid_key, match_id)))
+            if best_price < price:
+                break
+            match_payload = redis.hgetall(match_id)
+            match_amount = int(match_payload.get("amount", 0))
+            buyer_id = int(match_payload.get("uid", 0))
+            buyer = db_session.get(User, buyer_id)
+            if not buyer:
+                redis.delete(match_id)
+                redis.zrem(bid_key, match_id)
+                continue
+            trade_amount = min(amount_remaining, match_amount)
+            quote_units = _quote_units(settings, instrument, trade_amount, best_price)
+            accounts.change_balance(buyer, base_currency, trade_amount)
+            accounts.change_balance(user, quote_currency, quote_units)
+            _record_trade(buyer.id, instrument, "buy", trade_amount, best_price)
+            _record_trade(user.id, instrument, "sell", trade_amount, best_price)
+            completed_id = f"completed:{order_id}:{match_id}:{trade_amount}"
+            redis.hset(
+                completed_id,
+                mapping={
+                    "price": float(best_price),
+                    "quote_currency_amount": float(quote_units) / settings.currency(quote_currency).multiplier,
+                    "base_currency_amount": float(trade_amount) / settings.currency(base_currency).multiplier,
+                },
+            )
+            redis.zadd(completed_key, {completed_id: float(best_price)})
+            amount_remaining -= trade_amount
+            if trade_amount == match_amount:
+                redis.delete(match_id)
+                redis.zrem(bid_key, match_id)
+                redis.srem(f"{buyer_id}/orders", match_id)
+            else:
+                redis.hset(match_id, mapping={"amount": match_amount - trade_amount})
+            db_session.commit()
+        if amount_remaining > 0:
+            redis.hset(order_id, mapping={"amount": amount_remaining})
+            redis.zadd(ask_key, {order_id: float(price)})
+        else:
+            redis.delete(order_id)
+            redis.zrem(ask_key, order_id)
+            redis.srem(f"{user_id}/orders", order_id)
+    else:
+        logger.warning("Unknown order type %s", side)
 
 
-# with daemon.DaemonContext():
-#    while True:
-#        fill_order()
+def _process_once(settings: Settings, redis) -> bool:
+    item = redis.blpop("order_queue", timeout=1)
+    if not item:
+        return False
+    order_id = item[1]
+    payload = redis.hgetall(order_id)
+    if not payload:
+        return True
+    if payload.get("ordertype") == "cancel":
+        _handle_cancel(settings, redis, payload)
+    else:
+        _match_order(settings, redis, order_id, payload)
+    return True
 
-# For testing
-while True:
-    fill_order()
+
+@click.command()
+@click.option("--once", is_flag=True, help="Process only one queue item and exit")
+@click.option("--sleep", "sleep_interval", type=int, default=1, help="Sleep between idle polling attempts")
+def main(once: bool, sleep_interval: int) -> None:
+    app = create_app()
+    with app.app_context():
+        redis = get_redis_client()
+        settings = app.extensions["settings"]
+        logger.info("Starting order matching worker")
+        while True:
+            processed = _process_once(settings, redis)
+            if once:
+                break
+            if not processed:
+                time.sleep(sleep_interval)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

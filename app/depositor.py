@@ -1,79 +1,91 @@
-from jsonrpc import ServiceProxy
-import cPickle
-from .database import init_db, db_session, redis
-from .models import *
-from app import adjustbalance
-from .config import config
+"""Polling worker that credits deposits from RPC wallets."""
+from __future__ import annotations
+
 import logging
-import daemon
+import time
+from decimal import Decimal
 
-logging.basicConfig(filename=config.get_tx_log_file(), level=logging.DEBUG)
-currencies = config.get_currencies()
-init_db()
+import click
+from sqlalchemy import select
+
+from . import create_app
+from .database import db_session
+from .models import Address, CompletedOrder
+from .rpc import WalletError
+from .services import accounts
+
+logger = logging.getLogger(__name__)
 
 
-def handle_transactions():
-    for currency in currencies:
-        logging.info('Processing {} deposits'.format(currency))
-        oldtransactions = CompletedOrder.query.filter().all()
-        oldids = [x.transaction_id for x in oldtransactions]
-
-        rpc = ServiceProxy(currencies[currency]['daemon'])
-        transactions = [
-            tx for tx in rpc.listtransactions() if tx['category'] == 'receive']
-        newtransactions = []
-
-        for tx in transactions:
-            if tx['txid'] not in oldids:
-                newtransactions.append(tx)
-        for tx in newtransactions:
-            addr = Address.query.filter(
-                Address.address == str(
-                    tx['address'])).first()
-            if addr:
-                logging.info(
-                    "New Deposit! TXID: {} Amount: {} UserID: {}".format(
-                        tx['txid'],
-                        tx['amount'],
-                        addr.user))
-                adjustbalance(
-                    currency, addr.user, int(
-                        float(
-                            tx['amount']) * currencies[currency]['multiplier']))
-                co = CompletedOrder(
-                    currency + "_" + currency,
-                    "DEPOSIT",
-                    float(
-                        tx['amount']),
-                    0,
-                    addr.user,
-                    is_deposit=True,
-                    transaction_id=tx['txid'])
-                db_session.add(co)
-
-        logging.info('Processing {} withdrawals'.format(currency))
-        withdrawals = CompletedOrder.query.filter(
-            CompletedOrder.is_withdrawal).filter(
-            CompletedOrder.withdrawal_complete == False).all()
-        for withdrawal in withdrawals:
-            # TODO: some proper error checking etc
-            logging.info(
-                "New Withdrawal! Amount: {}".format(
-                    withdrawal.amount))
-            sendaddr = withdrawal.withdrawal_address
-            try:
-                rpc.sendtoaddress(sendaddr, withdrawal.amount)
-            except Exception as e:
-                logging.warning(
-                    "Error in executing withdrawal! ID: {} JSONRPC Error: {}".format(
-                        withdrawal.id,
-                        repr(
-                            e.error)))
-            withdrawal.withdrawal_complete = True
-            db_session.add(withdrawal)
+def _process_currency(registry, settings, currency_code: str) -> None:
+    currency = settings.currency(currency_code)
+    try:
+        transactions = registry.get_transaction_list(currency_code)
+    except WalletError as exc:
+        logger.warning("Unable to fetch transactions for %s: %s", currency_code, exc)
+        return
+    known_txs = {
+        tx_id
+        for (tx_id,) in db_session.execute(
+            select(CompletedOrder.transaction_id).where(CompletedOrder.transaction_id.isnot(None))
+        )
+    }
+    for tx in transactions:
+        if tx.get("category") != "receive":
+            continue
+        if tx.get("confirmations", 0) < currency.min_confirmations:
+            continue
+        txid = tx.get("txid")
+        if not txid or txid in known_txs:
+            continue
+        address = tx.get("address")
+        if not address:
+            continue
+        address_entry = db_session.execute(
+            select(Address).where(Address.currency == currency_code, Address.address == address)
+        ).scalar_one_or_none()
+        if not address_entry:
+            logger.info("Skipping deposit for unknown address %s", address)
+            continue
+        user = address_entry.user
+        amount_units = int(Decimal(str(tx.get("amount", 0))) * currency.multiplier)
+        if amount_units <= 0:
+            continue
+        accounts.change_balance(user, currency_code, amount_units)
+        order = CompletedOrder(
+            user_id=user.id,
+            instrument=f"{currency_code}_{currency_code}",
+            side="DEPOSIT",
+            base_currency=currency_code,
+            quote_currency=currency_code,
+            amount=amount_units,
+            price=Decimal("0"),
+            is_deposit=True,
+            transaction_id=txid,
+        )
+        db_session.add(order)
         db_session.commit()
+        logger.info(
+            "Credited %s %s to user %s", currency_code.upper(), Decimal(amount_units) / currency.multiplier, user.id
+        )
 
-with daemon.DaemonContext():
-    while True:
-        handle_transactions()
-# handle_transactions()
+
+@click.command()
+@click.option("--interval", type=int, default=30, help="Polling interval in seconds")
+@click.option("--once", is_flag=True, help="Process a single iteration and exit")
+def main(interval: int, once: bool) -> None:
+    app = create_app()
+    with app.app_context():
+        registry = app.extensions["wallet_registry"]
+        settings = app.extensions["settings"]
+        logger.info("Starting deposit processor")
+        while True:
+            for code in settings.currencies.keys():
+                _process_currency(registry, settings, code)
+            if once:
+                break
+            time.sleep(interval)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()

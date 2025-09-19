@@ -1,61 +1,47 @@
-"""
-=================
-API/JSON functions
-=================
-"""
+"""JSON API endpoints."""
+from __future__ import annotations
 
-import json
+from flask import Blueprint, abort, jsonify
 
-from flask import Blueprint, Response
-from app.config import config
-from app.database import redis
+from ..database import get_redis_client
+from ..services.orders import OrderBook
+from .helpers import get_settings
 
-api = Blueprint('api', __name__, url_prefix='/api')
+blueprint = Blueprint("api", __name__, url_prefix="/api")
 
 
-@api.route('/volume/<instrument>')
-def getvolumejson(instrument):
-    """ Returns open orders from redis orderbook. """
-    res = getvolume(instrument)
-    jo = json.dumps(res)
-    return Response(jo, mimetype='application/json')
+def _validate_instrument(instrument: str) -> str:
+    settings = get_settings()
+    if instrument not in settings.trading_pairs:
+        abort(404, description="Unknown trading pair")
+    return instrument
 
 
-@api.route('/high/<instrument>')
-def gethighjson(instrument):
-    """ Returns open orders from redis orderbook. """
-    jo = json.dumps({'high': gethigh(instrument)})
-    return Response(jo, mimetype='application/json')
+@blueprint.route("/volume/<instrument>")
+def volume(instrument: str):
+    instrument = _validate_instrument(instrument)
+    order_book = OrderBook(get_redis_client(), get_settings())
+    return jsonify(order_book.get_volume(instrument))
 
 
-@api.route('/low/<instrument>')
-def getlowjson(instrument):
-    """ Returns open orders from redis orderbook. """
-    jo = json.dumps({'low': getlow(instrument)})
-    return Response(jo, mimetype='application/json')
+@blueprint.route("/high/<instrument>")
+def high(instrument: str):
+    instrument = _validate_instrument(instrument)
+    order_book = OrderBook(get_redis_client(), get_settings())
+    return jsonify({"high": order_book.get_high(instrument)})
 
 
-@api.route('/orders/<instrument>/<t>')
-def getjsonorders(instrument, t):
-    """ Returns open orders from redis orderbook. """
-    orders = []
-    if config.is_valid_instrument(instrument):
-        if t == "bid":
-            bids = redis.zrange(instrument + "/bid", 0, -1, withscores=True)
-            for bid in bids:
-                orders.append(
-                    {"price": bid[1], "amount": redis.hget(bid[0], "amount")})
-        else:
-            asks = redis.zrange(instrument + "/ask", 0, -1, withscores=True)
-            for ask in asks:
-                orders.append(
-                    {"price": ask[1], "amount": redis.hget(ask[0], "amount")})
-        # So prices are not quoted in satoshis
-        # TODO: move this client side?
-        for order in orders:
-            order['amount'] = float(
-                order['amount']) / config.get_multiplier(instrument.split("_")[0])
-    else:
-        orders.append("Invalid trade pair!")
-    jo = json.dumps(orders)
-    return Response(jo, mimetype='application/json')
+@blueprint.route("/low/<instrument>")
+def low(instrument: str):
+    instrument = _validate_instrument(instrument)
+    order_book = OrderBook(get_redis_client(), get_settings())
+    return jsonify({"low": order_book.get_low(instrument)})
+
+
+@blueprint.route("/orders/<instrument>/<side>")
+def orders(instrument: str, side: str):
+    instrument = _validate_instrument(instrument)
+    if side not in {"bid", "ask"}:
+        abort(400, description="Side must be 'bid' or 'ask'")
+    order_book = OrderBook(get_redis_client(), get_settings())
+    return jsonify(order_book.list_orders(instrument, side))

@@ -1,0 +1,109 @@
+{% extends 'base.html' %}
+{% block title %}Account • EchangerNEXT{% endblock %}
+{% block content %}
+<div class="row g-4">
+  <div class="col-lg-8">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h2 class="h5 mb-3">Balances</h2>
+        <div class="table-responsive">
+          <table class="table table-hover align-middle">
+            <thead>
+              <tr>
+                <th scope="col">Currency</th>
+                <th scope="col">Balance</th>
+                <th scope="col">Deposit address</th>
+                <th scope="col" class="text-end">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for balance in balances %}
+              <tr>
+                <td class="text-uppercase">{{ balance.currency }}</td>
+                <td>{{ (balance.balance / currencies[balance.currency].multiplier) | round(8) }}</td>
+                <td class="font-monospace">
+                  {% if addresses.get(balance.currency) %}
+                    {{ addresses[balance.currency] }}
+                  {% else %}
+                    <span class="text-muted">Not generated</span>
+                  {% endif %}
+                </td>
+                <td class="text-end">
+                  <div class="btn-group btn-group-sm">
+                    <form method="post" action="{{ url_for('account.create_deposit_address', currency=balance.currency) }}">
+                      <button type="submit" class="btn btn-outline-light">Deposit</button>
+                    </form>
+                    <a class="btn btn-outline-light" href="{{ url_for('account.index', history=balance.currency) }}">History</a>
+                  </div>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    {% if history %}
+    <div class="card shadow-sm mt-4">
+      <div class="card-body">
+        <h2 class="h6 text-uppercase">{{ history_currency.upper() }} history</h2>
+        <div class="table-responsive">
+          <table class="table table-sm table-striped align-middle">
+            <thead>
+              <tr>
+                <th>Type</th>
+                <th>Amount</th>
+                <th>Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for order in history %}
+              <tr>
+                <td>
+                  {% if order.is_deposit %}Deposit{% elif order.is_withdrawal %}Withdrawal{% else %}{{ order.side|capitalize }}{% endif %}
+                </td>
+                <td>{{ (order.amount / currencies[history_currency].multiplier) | round(8) }}</td>
+                <td>{{ order.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+              </tr>
+              {% else %}
+              <tr>
+                <td colspan="3" class="text-center text-muted">No history yet</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+  <div class="col-lg-4">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h2 class="h5 mb-3">Withdraw funds</h2>
+        <form method="post" action="{{ url_for('account.withdraw') }}">
+          <div class="mb-3">
+            <label for="currency" class="form-label">Currency</label>
+            <select class="form-select" id="currency" name="currency">
+              {% for balance in balances %}
+              <option value="{{ balance.currency }}">{{ balance.currency.upper() }}</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="mb-3">
+            <label for="amount" class="form-label">Amount</label>
+            <input type="text" class="form-control" id="amount" name="amount" placeholder="0.00000000">
+          </div>
+          <div class="mb-3">
+            <label for="address" class="form-label">Destination address</label>
+            <input type="text" class="form-control" id="address" name="address" placeholder="Wallet address">
+          </div>
+          <div class="d-grid">
+            <button type="submit" class="btn btn-primary">Request withdrawal</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
