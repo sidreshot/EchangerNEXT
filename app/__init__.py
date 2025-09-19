@@ -1,60 +1,55 @@
-from flask import Flask, g, session
-from flask.ext.mail import Mail, Message
-from app.database import init_db, db_session, redis
+"""Application factory."""
+from __future__ import annotations
 
-app = Flask(__name__)
-app.config.update(
-    DEBUG=True,
-    SECRET_KEY='CHANGE_THIS',
-    # EMAIL SETTINGS
-    MAIL_SERVER='smtp.gmail.com',
-    MAIL_PORT=465,
-    MAIL_USE_SSL=True,
-    MAIL_USERNAME='admin@gmail.com',
-    MAIL_PASSWORD='password'
-)
+from pathlib import Path
 
-from .config import config
-from app.routes.api import api
-from app.routes.home import home
-from app.routes.account import account
-from app.routes.order import order
-from app.util import check_balance
-from flask_bootstrap import Bootstrap
+from flask import Flask
+from flask_mail import Mail
+from flask_wtf import CSRFProtect
+
+from .database import close_session, init_db, init_engine, init_redis_client
+from .logging_config import configure_logging
+from .routes import register_blueprints
+from .rpc import WalletRegistry
+from .settings import get_settings
+
+mail = Mail()
+csrf = CSRFProtect()
 
 
-app.register_blueprint(api)
-app.register_blueprint(home)
-app.register_blueprint(order)
-app.register_blueprint(account)
+def create_app() -> Flask:
+    settings = get_settings()
+    app = Flask(__name__, template_folder="templates", static_folder="static")
+    app.config.update(
+        SECRET_KEY=settings.secret_key,
+        MAIL_SERVER=settings.mail.server,
+        MAIL_PORT=settings.mail.port,
+        MAIL_USE_TLS=settings.mail.use_tls,
+        MAIL_USE_SSL=settings.mail.use_ssl,
+        MAIL_USERNAME=settings.mail.username,
+        MAIL_PASSWORD=settings.mail.password,
+        MAIL_DEFAULT_SENDER=settings.mail.default_sender,
+    )
 
-mail = Mail(app)
-Bootstrap(app)
+    configure_logging(debug=app.debug)
 
-@app.before_request
-def before_request():
-    g.db = connect_db()
+    mail.init_app(app)
+    csrf.init_app(app)
 
+    # Ensure the instance folder exists for SQLite databases.
+    Path(app.instance_path).mkdir(parents=True, exist_ok=True)
 
-@app.teardown_appcontext
-def shutdown_session(exception=None):
-    db_session.remove()
-
-
-@app.context_processor
-def balance_processor():
-    """ Used to get balance of currencies from the template for the account page. Flask required this for a callable function from the template.
-        For example, in the template one can do {{ getbalance("btc", 48549) }}. The division is done because this is what the front-end user sees,
-        and they do not want prices in satoshis or cents"""
-    def getbalance(c, uid):
-        return "{:.4f}".format(
-            check_balance(
-                c,
-                uid) /
-            float(
-                config.get_multiplier(c)))
-    return dict(getbalance=getbalance)
-
-
-def connect_db():
+    init_engine(settings.database_url)
     init_db()
+    init_redis_client(settings.redis_url)
+
+    app.extensions["settings"] = settings
+    app.extensions["wallet_registry"] = WalletRegistry(settings)
+
+    register_blueprints(app)
+    app.teardown_appcontext(close_session)
+
+    return app
+
+
+app = create_app()

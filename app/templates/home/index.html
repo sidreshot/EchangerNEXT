@@ -1,0 +1,124 @@
+{% extends 'base.html' %}
+{% block title %}Dashboard • EchangerNEXT{% endblock %}
+{% block content %}
+<div class="row g-4">
+  <div class="col-lg-8">
+    <div class="card shadow-sm h-100">
+      <div class="card-body">
+        <div class="d-flex justify-content-between align-items-center mb-3">
+          <div>
+            <h2 class="h4 text-uppercase mb-0">{{ instrument.replace('_', '/') }}</h2>
+            <small class="text-muted">24h stats</small>
+          </div>
+          <div>
+            <div class="btn-group">
+              {% for pair in trading_pairs %}
+                <a class="btn btn-outline-light btn-sm {% if pair == instrument %}active{% endif %}" href="{{ url_for('home.index', pair=pair) }}">{{ pair.upper() }}</a>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+        <div class="row text-center mb-4">
+          <div class="col-md-4">
+            <p class="text-muted mb-1">High</p>
+            <p class="fs-4">{{ '%.8f'|format(stats.high) }}</p>
+          </div>
+          <div class="col-md-4">
+            <p class="text-muted mb-1">Low</p>
+            <p class="fs-4">{{ '%.8f'|format(stats.low) }}</p>
+          </div>
+          <div class="col-md-4">
+            <p class="text-muted mb-1">Volume (base/quote)</p>
+            <p class="fs-6">{{ '%.4f'|format(stats.volume.base_currency_volume) }} / {{ '%.4f'|format(stats.volume.quote_currency_volume) }}</p>
+          </div>
+        </div>
+        <div class="row g-3">
+          <div class="col-md-6">
+            <h3 class="h6 text-uppercase">Asks</h3>
+            <div class="table-responsive">
+              <table class="table table-sm table-striped align-middle">
+                <thead>
+                  <tr>
+                    <th scope="col">Price</th>
+                    <th scope="col">Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for order in asks %}
+                  <tr>
+                    <td>{{ '%.8f'|format(order.price) }}</td>
+                    <td>{{ '%.6f'|format(order.amount) }}</td>
+                  </tr>
+                  {% else %}
+                  <tr>
+                    <td colspan="2" class="text-center text-muted">No asks yet</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <h3 class="h6 text-uppercase">Bids</h3>
+            <div class="table-responsive">
+              <table class="table table-sm table-striped align-middle">
+                <thead>
+                  <tr>
+                    <th scope="col">Price</th>
+                    <th scope="col">Amount</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for order in bids %}
+                  <tr>
+                    <td>{{ '%.8f'|format(order.price) }}</td>
+                    <td>{{ '%.6f'|format(order.amount) }}</td>
+                  </tr>
+                  {% else %}
+                  <tr>
+                    <td colspan="2" class="text-center text-muted">No bids yet</td>
+                  </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-lg-4">
+    <div class="card shadow-sm">
+      <div class="card-body">
+        <h2 class="h5 mb-3">Place order</h2>
+        {% if not user %}
+          <p class="text-muted">Please <a href="{{ url_for('auth.login') }}">log in</a> to place orders.</p>
+        {% else %}
+          <form method="post" action="{{ url_for('orders.place_order') }}">
+            {{ form.hidden_tag() }}
+            <div class="mb-3">
+              {{ form.instrument.label(class="form-label") }}
+              {{ form.instrument(class="form-select") }}
+            </div>
+            <div class="mb-3">
+              {{ form.side.label(class="form-label") }}
+              {{ form.side(class="form-select") }}
+            </div>
+            <div class="mb-3">
+              {{ form.price.label(class="form-label") }}
+              {{ form.price(class="form-control", placeholder="0.00000000") }}
+            </div>
+            <div class="mb-3">
+              {{ form.amount.label(class="form-label") }}
+              {{ form.amount(class="form-control", placeholder="0.00000000") }}
+            </div>
+            <div class="d-grid">
+              {{ form.submit(class="btn btn-primary") }}
+            </div>
+          </form>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}

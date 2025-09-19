@@ -10,6 +10,7 @@ __pycache__/
 # Distribution / packaging
 .Python
 .vagrant
+.venv/
 env/
 build/
 develop-eggs/
@@ -58,7 +59,8 @@ target/
 
 #misc bitcoin stuff
 #bitcoinrpc/*
-jsonrpc/*
 *.db
 *.txt
+.env
+instance/
 

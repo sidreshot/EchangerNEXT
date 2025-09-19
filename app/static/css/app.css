@@ -1,0 +1,57 @@
+body {
+  background-color: #0f172a;
+  color: #f8fafc;
+}
+
+.navbar-brand {
+  font-weight: 600;
+}
+
+.card {
+  background-color: #1e293b;
+  border: 1px solid #334155;
+}
+
+.table {
+  color: #f1f5f9;
+}
+
+.table thead th {
+  color: #cbd5f5;
+}
+
+.alert {
+  color: #0f172a;
+}
+
+.form-control, .form-select {
+  background-color: #0f172a;
+  color: #f8fafc;
+  border-color: #334155;
+}
+
+.form-control:focus, .form-select:focus {
+  background-color: #1e293b;
+  color: #f8fafc;
+  border-color: #6366f1;
+  box-shadow: 0 0 0 0.2rem rgba(99, 102, 241, 0.25);
+}
+
+.btn-primary {
+  background-color: #6366f1;
+  border-color: #6366f1;
+}
+
+.btn-primary:hover {
+  background-color: #4f46e5;
+  border-color: #4f46e5;
+}
+
+.btn-outline-light {
+  border-color: #94a3b8;
+  color: #f8fafc;
+}
+
+.btn-outline-light:hover {
+  background-color: #1e293b;
+}
